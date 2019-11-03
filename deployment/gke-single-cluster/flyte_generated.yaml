@@ -551,39 +551,36 @@ data:
       testing:
         host: http://flyteadmin
     database:
+      # Create a database like postgres and override these values
       port: 5432
       username: postgres
-      host: postgres
-      dbname: postgres
+      password: awesomesauce
+      # Recommended to use passwordPath and mount it using kubescrets or the like
+      # passwordPath: "/var/run/CREDENTIALS_DB_PASSWORD"
+      # host here is the private ip address of the CloudSQL Db in private mode
+      host: 10.23.0.3
+      dbname: flyte
       options: sslmode=disable
-    remoteData:
-      region: "us-east-1"
-      scheme: "local"
-      signedUrls:
-        durationMinutes: 3
     storage:
-      type: minio
-      connection:
-        access-key: minio
-        auth-type: accesskey
-        secret-key: miniostorage
-        disable-ssl: true
-        endpoint: http://minio.flyte.svc.cluster.local:9000
-        region: us-east-1
-      container: "my-s3-bucket"
+      type: stow
+      stow:
+        kind: google
+        config:
+          scopes: ""
+          project_id: flyte-sandbox
+          json: ""
+      container: "flyte-sandbox"
     task_resources:
       defaults:
-        cpu: 100m
-        memory: 100Mi
-        storage: 5Mi
+        cpu: 200m
+        gpu: 0
+        memory: 500Mi
+        storage: 100Mi
       limits:
-        cpu: 2
-        memory: 2G
-        storage: 20Mi
-    task_type_whitelist:
-      spark:
-        - project: flytekit
-        - project: flytetester
+        cpu: 62
+        gpu: 8
+        memory: 256Gi
+        storage: 5Gi
     domains:
       - id: development
         name: development
@@ -591,14 +588,14 @@ data:
         name: staging
       - id: production
         name: production
-      - id: domain
-        name: domain
+    registration:
+      maxWorkflowNodes: 100
     cluster_resources:
       templatePath: "/etc/flyte/clusterresource/templates"
       refresh: 5m
 kind: ConfigMap
 metadata:
-  name: flyte-admin-config-44hkc4cmdg
+  name: flyte-admin-config-bhkhcbfmcc
   namespace: flyte
 ---
 apiVersion: v1
@@ -629,16 +626,23 @@ data:
         - hiveExecutor
         - sidecar
       logs:
-        kubernetes-enabled: true
-        kubernetes-url: "http://localhost:30082"
+        # Log links can link to multiple options
+        # #1 Kubernetes dashboard
+        kubernetes-enabled: false
+        # #2 GCP stackdriver
+        stackdriver-enabled: true
+        gcp-project: flyte-sandbox
+        stackdriver-logresourcename: flyte
       k8s:
+        default-annotations:
+          # Example annotation that will be applied to every k8s resource launched
+          - flyte.lyft.net/deployment: base-google-gke
+        # Example Environment variables that will be applied to every container executed on k8s
         default-env-vars:
-          - FLYTE_AWS_ENDPOINT: "http://minio.flyte:9000"
-          - FLYTE_AWS_ACCESS_KEY_ID: minio
-          - FLYTE_AWS_SECRET_ACCESS_KEY: miniostorage
+          - FLYTE_CLOUD_PLATFORM: google
 kind: ConfigMap
 metadata:
-  name: flyte-plugin-config-mkhh79kf6f
+  name: flyte-plugin-config-hkh64698kg
   namespace: flyte
 ---
 apiVersion: v1
@@ -678,15 +682,14 @@ data:
       show-source: true
       level: 5
     storage:
-      connection:
-        access-key: minio
-        auth-type: accesskey
-        disable-ssl: true
-        endpoint: http://minio.flyte.svc.cluster.local:9000
-        region: us-east-1
-        secret-key: miniostorage
-      type: minio
-      container: my-s3-bucket
+      type: stow
+      stow:
+        kind: google
+        config:
+          scopes: ""
+          project_id: flyte-sandbox
+          json: ""
+      container: "flyte-sandbox"
     event:
       type: admin
       rate: 500
@@ -694,13 +697,14 @@ data:
     admin:
       endpoint: flyteadmin:81
       insecure: true
+    # TODO may be we should disable catalog cache in the default?
     catalog-cache:
       endpoint: datacatalog:89
       type: datacatalog
       insecure: true
 kind: ConfigMap
 metadata:
-  name: flyte-propeller-config-df4bf7dg67
+  name: flyte-propeller-config-96k59km44m
   namespace: flyte
 ---
 apiVersion: v1
@@ -746,17 +750,6 @@ metadata:
   namespace: flyte
 ---
 apiVersion: v1
-data:
-  config.yaml: |
-    plugins:
-      waitable:
-        console-uri: http://localhost:30081/console
-kind: ConfigMap
-metadata:
-  name: flyte-waitable-config-g8gch5968h
-  namespace: flyte
----
-apiVersion: v1
 kind: Service
 metadata:
   annotations:
@@ -780,6 +773,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
+    cloud.google.com/load-balancer-type: Internal
     contour.heptio.com/upstream-protocol.h2c: grpc
   name: flyteadmin
   namespace: flyte
@@ -799,10 +793,13 @@ spec:
     targetPort: 8089
   selector:
     app: flyteadmin
+  type: LoadBalancer
 ---
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    cloud.google.com/load-balancer-type: Internal
   name: flyteconsole
   namespace: flyte
 spec:
@@ -812,6 +809,7 @@ spec:
     targetPort: 8080
   selector:
     app: flyteconsole
+  type: LoadBalancer
 ---
 apiVersion: v1
 kind: Service
@@ -1066,7 +1064,7 @@ spec:
       - emptyDir: {}
         name: shared-data
       - configMap:
-          name: flyte-admin-config-44hkc4cmdg
+          name: flyte-admin-config-bhkhcbfmcc
         name: config-volume
 ---
 apiVersion: apps/v1
@@ -1156,8 +1154,6 @@ spec:
           name: qubole-config-volume
         - mountPath: /etc/flyte/config-container
           name: container-config-volume
-        - mountPath: /etc/flyte/config-waitable
-          name: waitable-config-volume
         - mountPath: /etc/flyte/config-spark
           name: spark-config-volume
         - mountPath: /etc/flyte/config
@@ -1173,16 +1169,13 @@ spec:
           name: flyte-container-config-5k78b9cm42
         name: container-config-volume
       - configMap:
-          name: flyte-waitable-config-g8gch5968h
-        name: waitable-config-volume
-      - configMap:
           name: flyte-spark-config-h72bmtggc2
         name: spark-config-volume
       - configMap:
-          name: flyte-propeller-config-df4bf7dg67
+          name: flyte-propeller-config-96k59km44m
         name: config-volume
       - configMap:
-          name: flyte-plugin-config-mkhh79kf6f
+          name: flyte-plugin-config-hkh64698kg
         name: plugin-config-volume
 ---
 apiVersion: apps/v1
@@ -1468,7 +1461,7 @@ spec:
               name: clusterresource-template-dgc9fcm2kh
             name: resource-templates
           - configMap:
-              name: flyte-admin-config-44hkc4cmdg
+              name: flyte-admin-config-bhkhcbfmcc
             name: config-volume
   schedule: '*/1 * * * *'
 ---
